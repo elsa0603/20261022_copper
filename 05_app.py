@@ -46,6 +46,89 @@ def friendly_shift(column: str) -> str:
     return column.removeprefix("Shift_")
 
 
+def apply_dashboard_filters(df: pd.DataFrame) -> pd.DataFrame:
+    """在左側側邊欄提供篩選條件，並回傳篩選後的資料。"""
+    filtered = df.copy()
+
+    date_bounds = None
+    if "Timestamp" in df.columns:
+        all_dates = df["Timestamp"].dropna()
+        if not all_dates.empty:
+            date_bounds = (all_dates.min().date(), all_dates.max().date())
+
+    shift_columns = [col for col in df.columns if col.startswith("Shift_")]
+    if "Shift" in df.columns:
+        all_shift_options = sorted(df["Shift"].dropna().astype(str).unique().tolist())
+    elif shift_columns:
+        all_shift_values = df[shift_columns].apply(pd.to_numeric, errors="coerce").fillna(0)
+        active_shifts = all_shift_values.idxmax(axis=1).str.removeprefix("Shift_")
+        active_shifts = active_shifts[all_shift_values.sum(axis=1) > 0]
+        all_shift_options = sorted(active_shifts.unique().tolist())
+    else:
+        all_shift_options = []
+
+    thickness_bounds = None
+    if "Thick_Mean_um" in df.columns:
+        all_thickness = pd.to_numeric(df["Thick_Mean_um"], errors="coerce").dropna()
+        if not all_thickness.empty:
+            low, high = float(all_thickness.min()), float(all_thickness.max())
+            thickness_bounds = (low - 0.01, high + 0.01) if low == high else (low, high)
+
+    with st.sidebar.expander("條件篩選", expanded=True):
+        if date_bounds:
+            date_range = st.date_input(
+                "日期範圍",
+                value=date_bounds,
+                min_value=date_bounds[0],
+                max_value=date_bounds[1],
+                key="dashboard_date_range",
+            )
+            if isinstance(date_range, (tuple, list)) and len(date_range) == 2:
+                start_date, end_date = date_range
+                filtered = filtered[
+                    filtered["Timestamp"].dt.date.between(start_date, end_date)
+                ]
+
+        if all_shift_options:
+            if "Shift" in filtered.columns:
+                filtered["Shift_Filter"] = filtered["Shift"].fillna("未知").astype(str)
+            else:
+                shift_values = filtered[shift_columns].apply(pd.to_numeric, errors="coerce").fillna(0)
+                filtered["Shift_Filter"] = shift_values.idxmax(axis=1).str.removeprefix("Shift_")
+                filtered.loc[shift_values.sum(axis=1) == 0, "Shift_Filter"] = "未知"
+            selected_shifts = st.multiselect(
+                "班別",
+                options=all_shift_options,
+                default=all_shift_options,
+                key="dashboard_shifts",
+            )
+            filtered = filtered[filtered["Shift_Filter"].isin(selected_shifts)]
+
+        if "Is_Anomaly" in filtered.columns:
+            status = pd.to_numeric(filtered["Is_Anomaly"], errors="coerce").fillna(0).astype(int)
+            status_choice = st.selectbox(
+                "異常狀態",
+                ["全部", "正常", "異常"],
+                key="dashboard_anomaly_status",
+            )
+            if status_choice == "正常":
+                filtered = filtered[status == 0]
+            elif status_choice == "異常":
+                filtered = filtered[status == 1]
+
+        if thickness_bounds and not filtered.empty:
+            thickness_range = st.slider(
+                "平均厚度範圍 (μm)",
+                min_value=thickness_bounds[0],
+                max_value=thickness_bounds[1],
+                value=thickness_bounds,
+                key="dashboard_thickness_range",
+            )
+            values = pd.to_numeric(filtered["Thick_Mean_um"], errors="coerce")
+            filtered = filtered[values.between(*thickness_range)]
+
+    return filtered
+
 def render_dashboard() -> None:
     st.title("銅箔製程資料視覺化")
     st.caption("檢視製程參數、厚度分布與異常標記。圖表使用專案中的處理後資料。")
@@ -61,7 +144,13 @@ def render_dashboard() -> None:
         st.error(f"讀取資料失敗：{exc}")
         return
 
-    st.caption(f"資料來源：{data_path.name}｜{len(df):,} 筆資料")
+    total_rows = len(df)
+    df = apply_dashboard_filters(df)
+    st.caption(f"資料來源：{data_path.name}｜顯示 {len(df):,} / {total_rows:,} 筆資料")
+    if df.empty:
+        st.warning("目前篩選條件沒有符合的資料，請調整左側條件。")
+        return
+
     anomaly_count = int(pd.to_numeric(df["Is_Anomaly"], errors="coerce").fillna(0).sum()) if "Is_Anomaly" in df else None
     thickness_mean = pd.to_numeric(df["Thick_Mean_um"], errors="coerce").mean() if "Thick_Mean_um" in df else np.nan
     kpi1, kpi2, kpi3 = st.columns(3)
